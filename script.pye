@@ -1,0 +1,27 @@
+# Define filenames
+file_names = ["input1.svc", "input2.svc"]
+
+# Define content
+file_content = """Case objective  "test description"
+Output (no issue)
+Case objective  "test description"
+
+Case objective  "test "pah" description"
+Output (no issue)
+Case objective  "test pah description"
+
+Case objective  "test "pah" Bjk "hjd" description"
+Output (no issue)
+Case objective  "test pah Bjk hjd description"
+"""
+
+# Create the .svc files and write content
+for file_name in file_names:
+    with open(file_name, "w") as file:
+        file.write(file_content)
+
+print("Two .svc files created successfully!")
+
+
+
+
