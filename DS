@@ -1,0 +1,174 @@
+#include <stdio.h>
+#include <string.h>
+
+// --- Type definitions ---
+typedef unsigned int UINT32;
+typedef int INT32;
+typedef unsigned char UINT8;
+typedef unsigned char BYTE;
+
+typedef enum {
+    C9AW_E_NO_ERROR,
+    C9AW_E_NO_ACTION,
+    C9AW_E_DESTINATION,
+} C9AW_Te_ReturnType;
+
+typedef enum { C9AW_Te_ValidityType_VALID } C9AW_Te_ValidityType;
+
+typedef struct {
+    UINT32 LineNumber;
+    UINT8 MachineIdentifier[4];
+    UINT8 LogData[10];
+    UINT32 EventIdentifier;
+    UINT8 EventStatus;
+} E5ET_Ts_EventLoggerData;
+
+typedef enum { FS_NO, FS_YES } FS_Status;
+
+// --- Constants ---
+#define F1EF_Ct_Messagesize 32
+#define F1FE_Ct_PLTF_DGI_MONITOR 1
+#define C9AW_Ct_InfiniteSystemTimeValue 0
+#define E5ET_Ct_MAXLOGDATA 10
+#define TRUE 1
+#define FALSE 0
+
+// --- Mock functions ---
+C9AW_Te_ReturnType C9AW_Se_CreateSamplingPort(UINT32 a, UINT32 b, C9AW_Te_ReturnType c, UINT32 d, INT32* e) {
+    printf("Mock: CreateSamplingPort\n");
+    if (e) *e = 1; // dummy PortID
+    return C9AW_E_NO_ERROR;
+}
+
+C9AW_Te_ReturnType C9AW_Se_ReadSamplingMessage(INT32 a, UINT8* data, UINT32 c, UINT32* Length, C9AW_Te_ValidityType* Validity) {
+    printf("Mock: ReadSamplingMessage\n");
+    if (Length) *Length = F1EF_Ct_Messagesize;
+    if (Validity) *Validity = C9AW_Te_ValidityType_VALID;
+
+    memset(data, 0xFF, c); // default all bits to 1
+
+    // Example: FS0 = NO, FS1 = NO
+    data[4] = FS_NO;
+    data[5] = FS_NO;
+
+    // Introduce a failure in byte 12
+    data[12] = 0xFE; // One bit off
+    return C9AW_E_NO_ERROR;
+}
+
+void E5MM_Se_MemSet(BYTE* a, UINT32 b, UINT32 c) {
+    memset(a, c, b);
+}
+
+void E5EU_Se_LogEvents(E5ET_Ts_EventLoggerData* a) {
+    printf("LOG: EventID=%u, Line=%u, LogData[0]=0x%02X\n",
+           a->EventIdentifier, a->LineNumber, a->LogData[0]);
+}
+
+// --- Updated Function ---
+void F1FM_Se_DGIHealthMonitoring(const UINT32 Bus_count)
+{
+    INT32 PortID = -1;
+    UINT32 byte_count = (Bus_count + 7) / 8;
+    UINT32 rem = Bus_count % 8;
+    UINT32 num_swaps = 0;
+    UINT32 i = 0;
+    UINT8 temp = 0;
+
+    UINT8 data[F1EF_Ct_Messagesize];
+    C9AW_Te_ValidityType Validity;
+    UINT32 Length;
+    C9AW_Te_ReturnType creation_return_code;
+    C9AW_Te_ReturnType read_return_code;
+    E5ET_Ts_EventLoggerData BswAPIFailure, BusFailure;
+
+    creation_return_code = C9AW_Se_CreateSamplingPort(F1FE_Ct_PLTF_DGI_MONITOR,
+                                                      F1EF_Ct_Messagesize,
+                                                      C9AW_E_DESTINATION,
+                                                      (UINT32)C9AW_Ct_InfiniteSystemTimeValue, &PortID);
+
+    if (creation_return_code != C9AW_E_NO_ERROR) {
+        BswAPIFailure.LineNumber = __LINE__;
+        memcpy(BswAPIFailure.MachineIdentifier, "F1FE", 4);
+        E5MM_Se_MemSet(BswAPIFailure.LogData, E5ET_Ct_MAXLOGDATA, 0);
+        BswAPIFailure.EventIdentifier = 57;
+        BswAPIFailure.EventStatus = TRUE;
+        E5EU_Se_LogEvents(&BswAPIFailure);
+        return;
+    }
+
+    read_return_code = C9AW_Se_ReadSamplingMessage(PortID, data, F1EF_Ct_Messagesize, &Length, &Validity);
+
+    if (read_return_code != C9AW_E_NO_ERROR) {
+        if (read_return_code != C9AW_E_NO_ACTION) {
+            BswAPIFailure.LineNumber = __LINE__;
+            memcpy(BswAPIFailure.MachineIdentifier, "F1FE", 4);
+            E5MM_Se_MemSet(BswAPIFailure.LogData, E5ET_Ct_MAXLOGDATA, 0);
+            BswAPIFailure.EventIdentifier = 58;
+            BswAPIFailure.EventStatus = TRUE;
+            E5EU_Se_LogEvents(&BswAPIFailure);
+        }
+        return;
+    }
+
+    // Byte swap logic
+    num_swaps = (Bus_count + 31) / 32;
+    for (i = 8; i < (8 + num_swaps * 4); i += 4) {
+        temp = data[i]; data[i] = data[i + 3]; data[i + 3] = temp;
+        temp = data[i + 1]; data[i + 1] = data[i + 2]; data[i + 2] = temp;
+    }
+
+    // === Dynamic FS Check without break ===
+    UINT32 fs_count = (Bus_count + 31) / 32;
+    UINT8 all_relevant_fs_no = TRUE;
+
+    for (i = 0; i < fs_count; i++) {
+        if (data[4 + i] != FS_NO) {
+            all_relevant_fs_no = FALSE;
+        }
+    }
+
+    // === If all FS_NO, perform original byte-by-byte check ===
+    if (all_relevant_fs_no) {
+        for (i = 8; i < (8 + byte_count); i++) {
+            if (i < (8 + byte_count - 1)) {
+                if ((data[i] & 0xFFU) != 0xFF) {
+                    BusFailure.LineNumber = __LINE__;
+                    BusFailure.MachineIdentifier[0] = 'F';
+                    BusFailure.MachineIdentifier[1] = '1';
+                    BusFailure.MachineIdentifier[2] = 'F';
+                    BusFailure.MachineIdentifier[3] = 'E';
+                    E5MM_Se_MemSet((BYTE*)BusFailure.LogData, (UINT32)E5ET_Ct_MAXLOGDATA, 0);
+                    BusFailure.EventIdentifier = 59;
+                    BusFailure.EventStatus = TRUE;
+                    BusFailure.LogData[0] = data[i];
+                    E5EU_Se_LogEvents(&BusFailure);
+                }
+            } else { // last byte
+                if (rem != 0 && (data[i] & ((1U << rem) - 1)) != ((1U << rem) - 1)) {
+                    BusFailure.LineNumber = __LINE__;
+                    BusFailure.MachineIdentifier[0] = 'F';
+                    BusFailure.MachineIdentifier[1] = '1';
+                    BusFailure.MachineIdentifier[2] = 'F';
+                    BusFailure.MachineIdentifier[3] = 'E';
+                    E5MM_Se_MemSet((BYTE*)BusFailure.LogData, (UINT32)E5ET_Ct_MAXLOGDATA, 0);
+                    BusFailure.EventIdentifier = 60;
+                    BusFailure.EventStatus = TRUE;
+                    BusFailure.LogData[0] = data[i];
+                    E5EU_Se_LogEvents(&BusFailure);
+                }
+            }
+        }
+    }
+}
+
+// --- Main simulation ---
+int main() {
+    printf("Simulation with Bus_count = 64\n");
+    F1FM_Se_DGIHealthMonitoring(64);
+
+    printf("\nSimulation with Bus_count = 50\n");
+    F1FM_Se_DGIHealthMonitoring(50);
+
+    return 0;
+}
